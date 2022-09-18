@@ -3,9 +3,11 @@ package govaluate
 import (
 	"errors"
 	"fmt"
+	"log"
 	"math"
-	"regexp"
 	"reflect"
+	"regexp"
+	"runtime"
 )
 
 const (
@@ -39,6 +41,9 @@ type evaluationStage struct {
 
 	// regardless of which type check is used, this string format will be used as the error message for type errors
 	typeErrorFormat string
+
+	// 如果是function就带上token，其他的类型就无效
+	token ExpressionToken
 }
 
 var (
@@ -66,19 +71,95 @@ func (this *evaluationStage) setToNonStage(other evaluationStage) {
 func (this *evaluationStage) isShortCircuitable() bool {
 
 	switch this.symbol {
-		case AND:
-			fallthrough
-		case OR:
-			fallthrough
-		case TERNARY_TRUE: 
-			fallthrough
-		case TERNARY_FALSE:
-			fallthrough
-		case COALESCE:
-			return true
+	case AND:
+		fallthrough
+	case OR:
+		fallthrough
+	case TERNARY_TRUE:
+		fallthrough
+	case TERNARY_FALSE:
+		fallthrough
+	case COALESCE:
+		return true
 	}
 
 	return false
+}
+
+type FunctionInfo struct {
+	Name   string
+	Var    []string //变量
+	Params []interface{}
+}
+
+func (this *evaluationStage) GetFunctionInfo() (*FunctionInfo, error) {
+	if this.symbol != FUNCTIONAL {
+		log.Printf("stage token is not function. this is %v", this.symbol)
+		return nil, InValidError
+	}
+
+	tmp := &FunctionInfo{
+		Var:    make([]string, 0),
+		Params: make([]interface{}, 0),
+	}
+	funcName := runtime.FuncForPC(reflect.ValueOf(this.token.Value).Pointer()).Name()
+	tmp.Name = funcName
+
+	kinds, datas := getFunctionInfo(this.rightStage)
+	if len(kinds) == 0 {
+		log.Printf("get function info but kinds is empty")
+		return tmp, nil
+	}
+
+	for i, kind := range kinds {
+		if kind == VARIABLE {
+			tmp.Var = append(tmp.Var, datas[i].(string))
+		} else {
+			tmp.Params = append(tmp.Params, datas[i])
+		}
+	}
+
+	return tmp, nil
+}
+
+func getFunctionInfo(stage *evaluationStage) ([]TokenKind, []interface{}) {
+	if stage == nil {
+		return []TokenKind{}, []interface{}{}
+	}
+
+	kinds := make([]TokenKind, 0)
+	datas := make([]interface{}, 0)
+	switch stage.symbol {
+	case NOOP:
+		{
+			kinds, datas = getFunctionInfo(stage.rightStage)
+		}
+	case SEPARATE:
+		{
+			if stage.leftStage != nil {
+				k1, d1 := getFunctionInfo(stage.leftStage)
+
+				kinds = append(kinds, k1...)
+				datas = append(datas, d1...)
+			}
+
+			if stage.rightStage != nil {
+				k2, d2 := getFunctionInfo(stage.rightStage)
+
+				kinds = append(kinds, k2...)
+				datas = append(datas, d2...)
+			}
+		}
+	case VALUE:
+		{
+			return []TokenKind{stage.token.Kind}, []interface{}{stage.token.Value}
+		}
+	case LITERAL:
+		{
+			return []TokenKind{stage.token.Kind}, []interface{}{stage.token.Value}
+		}
+	}
+	return kinds, datas
 }
 
 func noopStageRight(left interface{}, right interface{}, parameters Parameters) (interface{}, error) {
@@ -310,8 +391,8 @@ func isFloat64(value interface{}) bool {
 }
 
 /*
-	Addition usually means between numbers, but can also mean string concat.
-	String concat needs one (or both) of the sides to be a string.
+Addition usually means between numbers, but can also mean string concat.
+String concat needs one (or both) of the sides to be a string.
 */
 func additionTypeCheck(left interface{}, right interface{}) bool {
 
@@ -325,8 +406,8 @@ func additionTypeCheck(left interface{}, right interface{}) bool {
 }
 
 /*
-	Comparison can either be between numbers, or lexicographic between two strings,
-	but never between the two.
+Comparison can either be between numbers, or lexicographic between two strings,
+but never between the two.
 */
 func comparatorTypeCheck(left interface{}, right interface{}) bool {
 
@@ -348,8 +429,8 @@ func isArray(value interface{}) bool {
 }
 
 /*
-	Converting a boolean to an interface{} requires an allocation.
-	We can use interned bools to avoid this cost.
+Converting a boolean to an interface{} requires an allocation.
+We can use interned bools to avoid this cost.
 */
 func boolIface(b bool) interface{} {
 	if b {
